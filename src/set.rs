@@ -3,6 +3,9 @@ use core::iter::Peekable;
 use std::cmp::Ordering;
 use std::iter::FromIterator;
 use std::mem::replace;
+use std::ops::{Generator, GeneratorState};
+use std::pin::Pin;
+use std::marker::Unpin;
 
 #[cfg(test)]
 use quickcheck::{Arbitrary, Gen};
@@ -257,6 +260,68 @@ impl<'a, T: 'a + Ord> AvlTreeSet<T> {
         }
     }
 
+    pub fn iter_mut(&'a mut self) -> impl Iterator<Item = &'a mut T> + 'a {
+        return gen_to_iter(tree_gen_mut(&mut self.root));
+
+        fn tree_gen_mut<T: Ord>(tree: &mut AvlTree<T>) ->
+            impl Generator<Yield = &mut T, Return = ()> + Unpin
+        {
+            move || {
+                match tree {
+                    None => (),
+                    Some(node) => {
+                        {
+                            // The `gen` variable persists across a yield point, and its type
+                            // therefore becomes part of the return type of the `tree_gen_mut`
+                            // function. Rust does not allow the type of `tree_gen_mut` to be
+                            // recursive, and it would be recursive if the `gen` variable included
+                            // it. That's why we have to use `dyn` here.
+                            // See https://github.com/rust-lang/rust/issues/53690
+                            //
+                            // In addition, we have to use `Box` because otherwise the generator
+                            // state would directly _contain_ a variable of its own type, making
+                            // the generator state infinitely large.
+                            let mut gen : Box<dyn Unpin + Generator<Yield = &mut T, Return = ()>> =
+                                Box::new(tree_gen_mut(&mut node.left));
+                            while let GeneratorState::Yielded(n) = Pin::new(gen.as_mut()).resume()
+                            {
+                                yield n;
+                            }
+                        }
+                        yield &mut node.value;
+                        {
+                            let mut gen : Box<dyn Unpin + Generator<Yield = &mut T, Return = ()>> =
+                                Box::new(tree_gen_mut(&mut node.right));
+                            while let GeneratorState::Yielded(n) = Pin::new(gen.as_mut()).resume()
+                            {
+                                yield n;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // From https://stackoverflow.com/questions/51488432
+        /// Converts a generator to an iterator.
+        fn gen_to_iter<G: Unpin + Generator<Return = ()>>(g: G) -> impl Iterator<Item = G::Yield> {
+            return It(g);
+
+            struct It<G>(G);
+
+            impl<G: Unpin + Generator<Return = ()>> Iterator for It<G> {
+                type Item = G::Yield;
+
+                fn next(&mut self) -> Option<Self::Item> {
+                    match Pin::new(&mut self.0).resume() {
+                        GeneratorState::Yielded(y) => Some(y),
+                        GeneratorState::Complete(()) => None,
+                    }
+                }
+            }
+        }
+    }
+
     pub fn union(&'a self, other: &'a Self) -> impl Iterator<Item = &'a T> + 'a {
         AvlTreeSetUnionIter {
             left_iter: self.iter().peekable(),
@@ -394,6 +459,14 @@ mod properties {
         let btree_set = xs.iter().collect::<BTreeSet<_>>();
 
         equal(avl_set.iter(), btree_set.iter())
+    }
+
+    #[quickcheck]
+    fn iter_mut_parity(xs: Vec<usize>) -> bool {
+        let avl_set = xs.iter().collect::<AvlTreeSet<_>>();
+        let mut avl_set_2 = avl_set.clone();
+
+        equal(avl_set.iter(), avl_set_2.iter_mut())
     }
 
     #[quickcheck]

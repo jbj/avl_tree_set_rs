@@ -1,3 +1,6 @@
+#![feature(generators)]
+#![feature(generator_trait)]
+
 #![feature(test)]
 extern crate test;
 
